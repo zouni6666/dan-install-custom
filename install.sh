@@ -9,6 +9,7 @@ INSTALL_DIR="$PWD/dan-runtime"
 VERSION="latest"
 CPA_BASE_URL=""
 CPA_TOKEN=""
+DOMAINS_API_URL_OVERRIDE=""
 MAIL_API_URL=""
 MAIL_API_KEY=""
 THREADS="68"
@@ -16,6 +17,7 @@ WEB_TOKEN="linuxdo"
 CLIENT_API_TOKEN="linuxdo"
 PORT="25666"
 DEFAULT_PROXY=""
+DEFAULT_DOMAINS_API_URL="https://gpt-up.icoa.pp.ua/v0/management/domains"
 MAIL_DOMAIN_OPTIONS=()
 ENABLED_EMAIL_DOMAINS=()
 SYSTEMD="0"
@@ -35,6 +37,7 @@ Options:
   --version latest|vX.Y.Z
   --cpa-base-url URL
   --cpa-token TOKEN
+  --domains-api-url URL
   --mail-api-url URL
   --mail-api-key KEY
   --mail-domain DOMAIN            # repeatable, adds to both domain lists
@@ -58,6 +61,15 @@ trim_whitespace() {
   local value="${1-}"
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+normalize_url() {
+  local value
+  value="$(trim_whitespace "${1-}")"
+  while [[ -n "$value" && "$value" == */ ]]; do
+    value="${value%/}"
+  done
   printf '%s' "$value"
 }
 
@@ -118,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="${2:-}"; shift 2 ;;
     --cpa-base-url) CPA_BASE_URL="${2:-}"; shift 2 ;;
     --cpa-token) CPA_TOKEN="${2:-}"; shift 2 ;;
+    --domains-api-url) DOMAINS_API_URL_OVERRIDE="${2:-}"; shift 2 ;;
     --mail-api-url) MAIL_API_URL="${2:-}"; shift 2 ;;
     --mail-api-key) MAIL_API_KEY="${2:-}"; shift 2 ;;
     --mail-domain) add_mail_domain "${2:-}"; shift 2 ;;
@@ -167,6 +180,66 @@ json_array() {
     printf '"%s"' "$(json_escape "$value")"
   done
   printf ']'
+}
+
+resolve_domains_api_url() {
+  local base override
+  override="$(normalize_url "${DOMAINS_API_URL_OVERRIDE:-}")"
+  if [[ -n "$override" ]]; then
+    printf '%s' "$override"
+    return
+  fi
+
+  base="$(normalize_url "${CPA_BASE_URL:-}")"
+  if [[ -z "$base" ]]; then
+    printf '%s' "$DEFAULT_DOMAINS_API_URL"
+    return
+  fi
+
+  if [[ "$base" == */v0/management/domains ]]; then
+    printf '%s' "$base"
+  elif [[ "$base" == */v0/management ]]; then
+    printf '%s/domains' "$base"
+  else
+    printf '%s/v0/management/domains' "$base"
+  fi
+}
+
+fetch_domains_json() {
+  local url raw compact domains
+  url="$1"
+  raw="$(curl -fsSL "$url")" || return 1
+  compact="$(printf '%s' "$raw" | tr -d '\r\n')"
+  domains="$(printf '%s' "$compact" | sed -n 's/.*"domains"[[:space:]]*:[[:space:]]*\(\[[^]]*]\).*/\1/p')"
+  [[ -n "$domains" && "$domains" != "[]" ]] || return 1
+  printf '%s' "$domains"
+}
+
+load_domains_json() {
+  local primary fallback domains
+  primary="$(resolve_domains_api_url)"
+  fallback=""
+
+  if [[ -z "$(trim_whitespace "${DOMAINS_API_URL_OVERRIDE:-}")" && "$primary" != "$DEFAULT_DOMAINS_API_URL" ]]; then
+    fallback="$DEFAULT_DOMAINS_API_URL"
+  fi
+
+  echo "Fetching domains from ${primary}..." >&2
+  if domains="$(fetch_domains_json "$primary")"; then
+    printf '%s' "$domains"
+    return 0
+  fi
+
+  if [[ -n "$fallback" ]]; then
+    echo "Domains API ${primary} unavailable, falling back to ${fallback}..." >&2
+    if domains="$(fetch_domains_json "$fallback")"; then
+      printf '%s' "$domains"
+      return 0
+    fi
+  fi
+
+  echo "Failed to fetch a valid domains list." >&2
+  return 1
 }
 
 detect_os() {
@@ -258,7 +331,20 @@ fi
 mv -f "$TMP_BINARY" "$INSTALL_DIR/$LOCAL_BINARY"
 chmod +x "$INSTALL_DIR/$LOCAL_BINARY"
 
+CPA_BASE_URL="$(normalize_url "$CPA_BASE_URL")"
+MAIL_API_URL="$(normalize_url "$MAIL_API_URL")"
+
+AUTO_DOMAINS_JSON=""
+if [[ ${#MAIL_DOMAIN_OPTIONS[@]} -eq 0 && ${#ENABLED_EMAIL_DOMAINS[@]} -eq 0 ]]; then
+  AUTO_DOMAINS_JSON="$(load_domains_json)"
+fi
+
 DOMAIN_CONFIG_LINES=""
+if [[ -n "$AUTO_DOMAINS_JSON" ]]; then
+  DOMAIN_CONFIG_LINES+="
+  \"mail_domain_options\": ${AUTO_DOMAINS_JSON},
+  \"enabled_email_domains\": ${AUTO_DOMAINS_JSON},"
+fi
 if [[ ${#MAIL_DOMAIN_OPTIONS[@]} -gt 0 ]]; then
   DOMAIN_CONFIG_LINES+="
   \"mail_domain_options\": $(json_array "${MAIL_DOMAIN_OPTIONS[@]}"),"
@@ -293,10 +379,11 @@ cat > "$INSTALL_DIR/config/web_config.json" <<EOF
   "check_interval_minutes": 20,
   "manual_default_threads": ${THREADS},
   "manual_register_retries": 3,
-  "otp-retry-count": 10,
-  "otp-retry-interval-seconds": 1,
+  "otp_retry_count": 10,
+  "otp_retry_interval_seconds": 1,
   "runtime_logs": false,
   "web_token": "$(json_escape "$WEB_TOKEN")",
+  "client_api_token": "$(json_escape "$CLIENT_API_TOKEN")",
   "default_proxy": "$(json_escape "$DEFAULT_PROXY")",
   "use_registration_proxy": $([[ -n "${DEFAULT_PROXY// }" ]] && printf 'true' || printf 'false'),
   "cpa_base_url": "$(json_escape "$CPA_BASE_URL")",
