@@ -17,6 +17,8 @@ WEB_TOKEN="linuxdo"
 CLIENT_API_TOKEN="linuxdo"
 PORT="25666"
 DEFAULT_PROXY=""
+# Keep the domains list source separate from CPA uploads by default.
+# Many self-hosted CPA panels do not expose /v0/management/domains.
 DEFAULT_DOMAINS_API_URL="https://gpt-up.icoa.pp.ua/v0/management/domains"
 MAIL_DOMAIN_OPTIONS=()
 ENABLED_EMAIL_DOMAINS=()
@@ -183,26 +185,14 @@ json_array() {
 }
 
 resolve_domains_api_url() {
-  local base override
+  local override
   override="$(normalize_url "${DOMAINS_API_URL_OVERRIDE:-}")"
   if [[ -n "$override" ]]; then
     printf '%s' "$override"
     return
   fi
 
-  base="$(normalize_url "${CPA_BASE_URL:-}")"
-  if [[ -z "$base" ]]; then
-    printf '%s' "$DEFAULT_DOMAINS_API_URL"
-    return
-  fi
-
-  if [[ "$base" == */v0/management/domains ]]; then
-    printf '%s' "$base"
-  elif [[ "$base" == */v0/management ]]; then
-    printf '%s/domains' "$base"
-  else
-    printf '%s/v0/management/domains' "$base"
-  fi
+  printf '%s' "$DEFAULT_DOMAINS_API_URL"
 }
 
 fetch_domains_json() {
